@@ -74,12 +74,14 @@ void Session::RecvData(int8_t* data, uint32_t size)
 				return;
 			}
 
+			memcpy(completePacket->payload, &completePacket->header, sizeof(Header));
+
 			if (payloadSize > 0)
 			{
-				recvBuf->Read(completePacket->payload, payloadSize);
+				recvBuf->Read(completePacket->payload + sizeof(Header), payloadSize);
 			}
 
-			OnSend(completePacket->payload, payloadSize);
+			OnSend(completePacket->payload, completePacket->header.len);
 
 			// 완성된 패킷을 등록한 callback에 전달
 			m_msgComplete(std::move(completePacket));

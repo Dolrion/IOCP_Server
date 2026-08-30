@@ -17,6 +17,7 @@ bool IOCPSvrProc::OpenServer(int port)
 	if (m_server->OpenServer(port))
 	{
 		m_worker = std::jthread([this]() { GetRecvData(m_token); });
+		res = true;
 	}
 
 	return res;

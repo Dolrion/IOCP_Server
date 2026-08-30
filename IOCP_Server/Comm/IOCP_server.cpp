@@ -220,7 +220,7 @@ void IOCP_server::AccpetProc(std::stop_token token)
 				// 클라이언트 연결 완료. 초기 연결 정보 전송
 				ZeroMemory(&packet, sizeof(DataPacket));
 				packet.header.id = socketKey;
-				packet.header.len = 4;
+				packet.header.len = sizeof(DataPacket);
 
 				client->OnSend(&packet, sizeof(DataPacket));
 				printf("[Accept] new client: %s(%lld)\n", inet_ntoa(acceptSock->socketAddr.sin_addr), socketKey);

@@ -16,7 +16,13 @@
 int main()
 {
     std::unique_ptr<IOCPSvrProc> server = make_unique<IOCPSvrProc>();
-    server->OpenServer(9000);
+
+    int port = 0;
+    std::cout << "포트 입력: ";
+    std::cin >> port;
+
+    if (server->OpenServer(port))
+        std::cout << "서버 Open\n";
 
     while (true)
     {
