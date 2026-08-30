@@ -1,0 +1,81 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="소스 파일">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="헤더 파일">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="리소스 파일">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Comm">
+      <UniqueIdentifier>{7e44959b-62a0-42ec-ac31-503eb0e14f02}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Pool">
+      <UniqueIdentifier>{c691e904-8269-476c-a7ca-bf244d0275ad}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Process">
+      <UniqueIdentifier>{29b5447b-1062-4db7-990b-f20f13755159}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UTIL">
+      <UniqueIdentifier>{6a1949e5-799b-4396-996f-c98895b0265b}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Comm\CommHeader.h">
+      <Filter>Comm</Filter>
+    </ClInclude>
+    <ClInclude Include="Comm\IOCP_Define.h">
+      <Filter>Comm</Filter>
+    </ClInclude>
+    <ClInclude Include="Comm\IOCP_server.h">
+      <Filter>Comm</Filter>
+    </ClInclude>
+    <ClInclude Include="Comm\Session.h">
+      <Filter>Comm</Filter>
+    </ClInclude>
+    <ClInclude Include="UTIL\CircularBuf.h">
+      <Filter>UTIL</Filter>
+    </ClInclude>
+    <ClInclude Include="UTIL\QueueBuffer.h">
+      <Filter>UTIL</Filter>
+    </ClInclude>
+    <ClInclude Include="Process\IOCPSvrProc.h">
+      <Filter>Process</Filter>
+    </ClInclude>
+    <ClInclude Include="Pool\InstancePool.h">
+      <Filter>Pool</Filter>
+    </ClInclude>
+    <ClInclude Include="Pool\MemoryPool.h">
+      <Filter>Pool</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Comm\IOCP_server.cpp">
+      <Filter>Comm</Filter>
+    </ClCompile>
+    <ClCompile Include="Comm\Session.cpp">
+      <Filter>Comm</Filter>
+    </ClCompile>
+    <ClCompile Include="UTIL\CircularBuf.cpp">
+      <Filter>UTIL</Filter>
+    </ClCompile>
+    <ClCompile Include="UTIL\QueueBuffer.cpp">
+      <Filter>UTIL</Filter>
+    </ClCompile>
+    <ClCompile Include="Process\IOCPSvrProc.cpp">
+      <Filter>Process</Filter>
+    </ClCompile>
+    <ClCompile Include="Pool\MemoryPool.cpp">
+      <Filter>Pool</Filter>
+    </ClCompile>
+    <ClCompile Include="Main.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
