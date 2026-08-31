@@ -108,14 +108,14 @@ void IOCP_server::PostAccept()
 	ZeroMemory(&accCtx->overlapped, sizeof(OVERLAPPED));
 
 	accCtx->type = IO_ACCEPT;
-	accCtx->acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+	accCtx->socket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
 
 	DWORD recvBytes = 0;
 
 	// ReceiveDataLength = 0:
 	// 연결 데이터는 받지 않고 연결 완료만 비동기로 통지
 	bool ret;
-	ret = m_lpfnAcceptEx(m_listenSock->socket, accCtx->acceptSocket,
+	ret = m_lpfnAcceptEx(m_listenSock->socket, accCtx->socket,
 		accCtx->addrBuf, 0,
 		sizeof(sockaddr_in) + 16,
 		sizeof(sockaddr_in) + 16,
@@ -135,20 +135,15 @@ void IOCP_server::PostAccept()
 void IOCP_server::AccpetProc(std::stop_token token)
 {
 	DWORD bytes;
-	SOCKET_CONTEXT* sockCtx;
 	BASE_IO_CONTEXT* ctx;
+	ULONG_PTR CompletionKey;		// 미사용
 
 	DataPacket packet;
 
 	while (!token.stop_requested())
 	{
 		// OVERLAPPED 기반 완료된 I/O 작업 구분
-		BOOL result = GetQueuedCompletionStatus(
-			m_hIOCP,
-			&bytes,
-			(PULONG_PTR)&sockCtx,
-			(OVERLAPPED**)&ctx,
-			INFINITE);
+		BOOL result = GetQueuedCompletionStatus(m_hIOCP, &bytes, &CompletionKey, (OVERLAPPED**)&ctx, INFINITE);
 
 		// nullptr OVERLAPPED는 서버 종료용 완료 통지
 		if (ctx == nullptr)
@@ -157,13 +152,10 @@ void IOCP_server::AccpetProc(std::stop_token token)
 		// 실제 I/O 실패
 		if (!result)
 		{
-			DWORD error = GetLastError();
-
-			uint64_t socketKey = sockCtx->socket;
-
+			uint64_t socketKey = ctx->socket;
 			if (m_sessionManager.find(socketKey) != m_sessionManager.end())
 			{
-				printf("[Disconnect] client %lld, error: %lu\n", socketKey, error);
+				printf("[Disconnect] client %lld, error: %lu\n", socketKey, WSAGetLastError());
 				m_sessionManager[socketKey]->Disconnect();
 			}
 
@@ -180,21 +172,37 @@ void IOCP_server::AccpetProc(std::stop_token token)
 			// AcceptEx 전용 컨텍스트.
 			// OVERLAPPED를 첫 멤버로 두어 완료 이벤트에서 ACCEPT_CONTEXT로 복원
 			auto* accCtx = (ACCEPT_CONTEXT*)ctx;      // 연결을 받기 위한 임시 소켓
-			SOCKET_INFO* acceptSock = new SOCKET_INFO;
-			acceptSock->socket = accCtx->acceptSocket;
+			accCtx->socket;
 
 			// accept context 업데이트
 			// AcceptEx로 생성된 소켓을 listen socket의 accept context와 연결
 			// 이후 getpeername, SO_KEEPALIVE 등의 소켓 옵션 사용
-			setsockopt(acceptSock->socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(m_listenSock->socket), sizeof(m_listenSock->socket));
+			setsockopt(accCtx->socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(m_listenSock->socket), sizeof(m_listenSock->socket));
 
-			int len = sizeof(acceptSock->socketAddr);
-			getpeername(acceptSock->socket, (SOCKADDR*)&acceptSock->socketAddr, &len);
+			char optval = 1;
+			setsockopt(accCtx->socket, IPPROTO_TCP, SO_KEEPALIVE, &optval, sizeof(optval));		// keep alive 설정
+
+			tcp_keepalive keepAlive;
+			keepAlive.onoff = 1;
+			keepAlive.keepalivetime = 5000;      // 5 sec
+			keepAlive.keepaliveinterval = 1000;   // 3 sec
+
+			DWORD bytesReturned;
+			if (WSAIoctl(accCtx->socket, SIO_KEEPALIVE_VALS, &keepAlive, sizeof(keepAlive), NULL, 0, &bytesReturned, NULL, NULL) == SOCKET_ERROR)
+			{
+				printf("client socket set SIO_KEEPALIVE_VALS failed: %d\n", WSAGetLastError());
+				closesocket(accCtx->socket);
+				continue;
+			}
+
+			SOCKADDR_IN socketAddr;
+			int len = sizeof(socketAddr);
+			getpeername(accCtx->socket, (SOCKADDR*)&socketAddr, &len);
 
 			// 접속 client socket IOCP 등록
 			// 이후 클라이언트 I/O 완료 통지를 IOCP에서 처리
 			// CompletionKey에는 연결별 SOCKET_INFO 전달
-			CreateIoCompletionPort((HANDLE)acceptSock->socket, m_hIOCP, (ULONG_PTR)acceptSock, 0);
+			CreateIoCompletionPort((HANDLE)accCtx->socket, m_hIOCP, 0, 0);
 
 			// 걸어둔 AcceptEx는 1회성. 새로운 연결을 받기 위해 다시 호출
 			PostAccept();
@@ -202,64 +210,56 @@ void IOCP_server::AccpetProc(std::stop_token token)
 			// Session에서 발생한 패킷/연결 종료 이벤트를 서버로 전달
 			unique_ptr<Session> client = make_unique<Session>([this](DataPacket* data) { InsertPacket(data); }, [this](SOCKET_INFO& sockInfo) { ConnectLost(sockInfo); });
 			// 완료통지에서 할당한 소켓 주소 key 삽입
-			client->session.socket = accCtx->acceptSocket;
-			client->session.socketAddr = acceptSock->socketAddr;
-			client->ioCtx.type = IO_RECV;
-
-			DWORD flags = 0;
-			DWORD recvBytes = 0;
+			client->SetSessionInfo(accCtx->socket, socketAddr);
 
 			if (client->PostRecv())
 			{
-				uint64_t socketKey = accCtx->acceptSocket;
+				uint64_t socketKey = accCtx->socket;
+
+				// 연결된 클라이언트를 관리 컨테이너에 등록
+				m_sessionManager.insert(make_pair(socketKey, move(client)));
 
 				// 연결완료 통지
 				if (m_connectCall)
 					m_connectCall(socketKey);
 
 				// 클라이언트 연결 완료. 초기 연결 정보 전송
+				printf("[Accept] new client: %s(%lld)\n", inet_ntoa(socketAddr.sin_addr), socketKey);
 				ZeroMemory(&packet, sizeof(DataPacket));
 				packet.header.id = socketKey;
 				packet.header.len = sizeof(DataPacket);
-
-				client->OnSend(&packet, sizeof(DataPacket));
-				printf("[Accept] new client: %s(%lld)\n", inet_ntoa(acceptSock->socketAddr.sin_addr), socketKey);
-
-				// 연결된 클라이언트를 관리 컨테이너에 등록
-				m_sessionManager.insert(make_pair(socketKey, move(client)));
+				m_sessionManager[socketKey]->OnSend(&packet, sizeof(DataPacket));
 			}
-			else
-			{
-				delete ctx;
-			}
-			//
 
 			// accept 완료 후 더 이상 쓰이지 않음 -> 삭제
 			delete accCtx;
 		}
 		break;
+
 		case IO_RECV:
 		{
+			auto* ioCtx = static_cast<IO_CONTEXT*>(ctx);
+
 			// 정상적인 연결 종료
-			if (bytes == 0)
+			if (bytes <= 0)
 			{
-				std::cout << "[Disconnect]" << std::endl;
-				m_sessionManager.erase(sockCtx->socket);
+				printf("[Disconnect] client %lld, error: %lu\n", ioCtx->socket, WSAGetLastError());
+				m_sessionManager.erase(ioCtx->socket);
 				continue;
 			}
 
 			// 등록된 컨테이너에서 socket 값으로 Session 식별 후 수신 버퍼로 전달
-			auto iter = m_sessionManager.find(sockCtx->socket);
+			auto iter = m_sessionManager.find(ioCtx->socket);
 			if (iter != m_sessionManager.end())
 			{
-				iter->second->RecvData((int8_t*)(((IO_CONTEXT*)ctx)->data), bytes);
+				iter->second->RecvData((int8_t*)(ioCtx->data), bytes);
 			}
 		}
 		break;
 		case IO_SEND:
 		{
 			auto* ioCtx = static_cast<SEND_IO_CONTEXT*>(ctx);
-			auto iter = m_sessionManager.find(sockCtx->socket);
+			auto iter = m_sessionManager.find(ioCtx->socket);
 			if (iter != m_sessionManager.end())
 			{
 				// Send 완료 처리 Session 전달

@@ -1,7 +1,5 @@
 #include "CircularBuf.h"
 
-#include <cstring>
-
 size_t CircularBuf::Write(const int8_t* src, size_t n)
 {
 	if (!src || n == 0) return 0;
@@ -29,15 +27,15 @@ bool CircularBuf::Peek(int8_t* dst, size_t n)
 	return true;
 }
 
-bool CircularBuf::Read(int8_t* dst, size_t n)
+size_t CircularBuf::Read(int8_t* dst, size_t n)
 {
 	if (!dst || n == 0) return false;
-	if (n > m_dataSize) return false;
 
-	Copy(dst, n);
-	m_readPos = (m_readPos + n) % m_capacity;
-	m_dataSize -= n;
-	return true;
+	size_t readSize = std::min(n, m_dataSize);
+	Copy(dst, readSize);
+	m_readPos = (m_readPos + readSize) % m_capacity;
+	m_dataSize -= readSize;
+	return readSize;
 }
 
 void CircularBuf::Copy(int8_t* dst, size_t n)
