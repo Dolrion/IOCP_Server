@@ -24,7 +24,7 @@ class Session : public std::enable_shared_from_this<Session>
 {
 public:
 	using PacketCallback = std::function<void(DataPacket*)>;
-	using CloseCallback = std::function<void(SOCKET)>;
+	using CloseCallback = std::function<void(SessionId)>;
 
 private:
 	SOCKET_INFO m_session;
@@ -33,28 +33,32 @@ private:
 	IO_CONTEXT m_recvCtx;									// 고유 recv context
 	CircularBuf m_recvBuf;
 
+	std::atomic<size_t> m_pendingSendBytes{ 0 };
 	std::mutex m_mtxSend;
 	InstancePool<SEND_IO_CONTEXT> m_sendCtxPool;		// send 데이터 완료 통지
 
 	PacketCallback m_msgComplete;
 	CloseCallback m_onClosed;
+private:
+	bool PostRecv();
+	bool ProcessPackets();
 
 public:
-	Session(PacketCallback pushMessage, CloseCallback closeEvent);
+	Session(SOCKET socket, const SOCKADDR_IN& socketAddr, PacketCallback pushMessage, CloseCallback closeEvent);
 	~Session();
 
 	Session(const Session&) = delete;
 	Session& operator=(const Session&) = delete;
-	
-	void SetSessionInfo(SOCKET socket, SOCKADDR_IN socketAddr);
 
-	bool PostRecv();
-	void RecvComplete(uint32_t writeSize);
-	bool ProcessPackets();
+	SessionId GetId() const { return m_session.socket; }
 
+	bool Start();		// 첫 수신 등록 (shared_ptr 로 소유된 뒤에 호출)
 	bool OnSend(void* packet, size_t len);
 
 	void Close();
+
+	// IOCP 워커 스레드에서 호출 (I/O 컨텍스트의 owner 참조를 회수한 상태)
+	void RecvComplete(uint32_t writeSize);
 	void SendComplete(SEND_IO_CONTEXT& ioCtx, bool success);
 };
 

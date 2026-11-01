@@ -29,6 +29,18 @@ inline constexpr int ACCEPT_POST_COUNT = 8;			// 미리 등록할 AcceptEx 개�
 
 // 세션당 수신 링버퍼: 미완성 패킷(최대 PACKET_CHUNK_SIZE-1) + 새로 받은 recv 1회분(BUFFER_SIZE) 이상이어야 함
 inline constexpr size_t RECV_RING_SIZE = 32 * 1024;
+inline constexpr size_t MAX_PENDING_SEND_BYTES = 1024 * 1024;	// 세션당 전송 대기 상한 (초과 시 느린 수신자로 보고 종료)
+
+// 소켓/스레드 관련 설정값
+inline constexpr DWORD KEEPALIVE_TIME_MS = 5000;		// 유휴 상태가 이 시간 지속되면 keepalive 전송 시작
+inline constexpr DWORD KEEPALIVE_INTERVAL_MS = 1000;	// keepalive 재전송 간격
+inline constexpr DWORD WORKER_POLL_MS = 100;			// 워커의 완료 통지 대기 시간 (= 종료 요청을 감지하는 주기)
+inline constexpr int CONSUMER_POLL_MS = 100;			// 소비 스레드 폴링 주기
+inline constexpr int ACCEPT_REPOST_RETRY = 3;			// accept 재등록 재시도 횟수
+inline constexpr int ACCEPT_REPOST_DELAY_MS = 10;		// 재시도 간격
+
+// 세션 식별자 - SOCKET 값을 그대로 사용
+using SessionId = SOCKET;
 
 class Session;
 
@@ -96,8 +108,8 @@ struct SEND_IO_CONTEXT : BASE_IO_CONTEXT
 
 struct SOCKET_INFO
 {
-	SOCKET socket;
-	SOCKADDR_IN socketAddr;
+	SOCKET socket = INVALID_SOCKET;
+	SOCKADDR_IN socketAddr{};
 
 	void CloseSocket()
 	{

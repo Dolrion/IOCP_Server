@@ -1,7 +1,5 @@
 ﻿#pragma once
 
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-
 #include "../UTIL/CircularBuf.h"
 #include "IOCP_Define.h"
 #include "Session.h"
@@ -16,19 +14,19 @@
 class IOCP_server
 {
 public:
-	using SessionCallback = std::function<void(uint64_t)>;
+	using SessionCallback = std::function<void(SessionId)>;
 
 private:
 	HANDLE m_hIOCP;
 	LPFN_ACCEPTEX m_lpfnAcceptEx;			// AcceptEx 포인터
 	std::unique_ptr<SOCKET_INFO> m_listenSock;
-	std::jthread m_worker[IO_WORKER_COUNT];				// 수신 스레드
+	std::jthread m_worker[IO_WORKER_COUNT];				// IO 워커 스레드
 
 	std::atomic<bool> m_open{ false };
 	bool m_wsaStarted = false;
 
 	std::mutex m_sessionMtx;
-	std::unordered_map <SOCKET, std::shared_ptr<Session>> m_sessionManager;		// 클라이언트 리스트
+	std::unordered_map <SessionId, std::shared_ptr<Session>> m_sessionManager;		// 세션 리스트
 
 	std::queue<DataPacket*> m_batch;
 	std::mutex m_dataMtx;
@@ -38,9 +36,15 @@ private:
 
 private:
 	bool PostAccept();
+	void RepostAccept();
 	void WorkProc(std::stop_token token);
+
+	// accept 완료 처리 = 소켓 설정 → 세션 생성/등록 → 첫 recv
 	void OnAccept(ACCEPT_CONTEXT* rawCtx, bool ok);
-	void CloseSession(uint64_t id);
+	bool ConfigureAcceptedSocket(SOCKET accSocket, SOCKADDR_IN& peerAddr);
+	std::shared_ptr<Session> CreateSession(SOCKET accSocket, const SOCKADDR_IN& peerAddr);
+
+	void CloseSession(SessionId id);
 
 public:
 	IOCP_server(SessionCallback connectCall = nullptr, SessionCallback disconnectCall = nullptr);
@@ -54,7 +58,7 @@ public:
 	void InsertPacket(DataPacket* packet);
 	int GetRecvData(std::queue<DataPacket*>* container);
 
-	std::shared_ptr<Session> FindSession(uint64_t id);
-	std::shared_ptr<Session> RemoveSession(uint64_t id);
+	std::shared_ptr<Session> FindSession(SessionId id);
+	std::shared_ptr<Session> RemoveSession(SessionId id);
 };
 

@@ -68,7 +68,7 @@ bool IOCP_server::OpenServer(int port)
 	DWORD bytes = 0;
 	if (WSAIoctl(m_listenSock->socket, SIO_GET_EXTENSION_FUNCTION_POINTER,
 		&guidAcceptEx, sizeof(guidAcceptEx),
-		&m_lpfnAcceptEx, sizeof(m_lpfnAcceptEx),		// BOOL AccpetEx 함수 포인터 받아옴
+		&m_lpfnAcceptEx, sizeof(m_lpfnAcceptEx),		// BOOL AcceptEx 함수 포인터 받아옴
 		&bytes, NULL, NULL) == SOCKET_ERROR || m_lpfnAcceptEx == NULL)
 	{
 		CloseServerSocket();
@@ -95,9 +95,16 @@ bool IOCP_server::OpenServer(int port)
 	for (int i = 0; i < IO_WORKER_COUNT; i++)
 		m_worker[i] = std::jthread([this](std::stop_token token) { WorkProc(token); });
 
-	// 7. AcceptEx 등록
+	// 7. AcceptEx 등록 (하나라도 실패하면 서버를 열지 않는다)
 	for (int i = 0; i < ACCEPT_POST_COUNT; i++)
-		PostAccept();
+	{
+		if (!PostAccept())
+		{
+			printf("[Server] initial AcceptEx post failed\n");
+			CloseServerSocket();
+			return false;
+		}
+	}
 
 	return true;
 }
@@ -142,20 +149,41 @@ bool IOCP_server::PostAccept()
 	return true;
 }
 
+// accept 완료 후 다음 접속을 받기 위한 재등록. 일시적 실패로 accept 슬롯이 제거되는 것을 방지
+void IOCP_server::RepostAccept()
+{
+	for (int retry = 0; retry < ACCEPT_REPOST_RETRY; retry++)
+	{
+		if (!m_open)		// 서버 종료 감지
+			return;
+
+		if (PostAccept())
+			return;
+
+		Sleep(ACCEPT_REPOST_DELAY_MS);
+	}
+
+	printf("[Accept] re-post failed. accept slot lost\n");
+}
+
 void IOCP_server::WorkProc(std::stop_token token)
 {
-	while (!token.stop_requested())
+	while (true)
 	{
-		DWORD bytes;
+		DWORD bytes = 0;
 		SOCKET socketKey = 0;
 		BASE_IO_CONTEXT* ctx = nullptr;
 
 		// OVERLAPPED 기반 완료된 I/O 작업 구분
-		BOOL result = GetQueuedCompletionStatus(m_hIOCP, &bytes, &socketKey, (OVERLAPPED**)&ctx, INFINITE);
+		BOOL result = GetQueuedCompletionStatus(m_hIOCP, &bytes, &socketKey, (OVERLAPPED**)&ctx, WORKER_POLL_MS);
 
-		// OVERLAPPED가 nullptr인 경우는 서버 종료용 완료 통지
+		// ctx == nullptr: WORKER_POLL_MS 동안 통지가 없었음(타임아웃) 또는 IOCP 핸들 오류
 		if (ctx == nullptr)
-			break;
+		{
+			if (token.stop_requested() || (!result && GetLastError() != WAIT_TIMEOUT))
+				break;	// 종료 요청 후 조용해졌거나 복구 불가 오류
+			continue;
+		}
 
 		switch (ctx->type)
 		{
@@ -198,8 +226,6 @@ void IOCP_server::WorkProc(std::stop_token token)
 
 void IOCP_server::OnAccept(ACCEPT_CONTEXT* rawCtx, bool ok)
 {
-	// AcceptEx 전용 컨텍스트.
-	// OVERLAPPED를 첫 멤버로 두어 완료 이벤트에서 ACCEPT_CONTEXT로 복원
 	// PostAccept에서 포기한 소유권 획득 -> 이곳에서 소멸
 	std::unique_ptr<ACCEPT_CONTEXT> accCtx(rawCtx);
 	SOCKET accSocket = accCtx->socket;
@@ -208,59 +234,103 @@ void IOCP_server::OnAccept(ACCEPT_CONTEXT* rawCtx, bool ok)
 	if (!ok || !m_open)
 	{
 		closesocket(accSocket);
-		if (m_open)
-			PostAccept();		// 서버가 열려 있는데 실패한 경우에만 다음 접속 대비
+		RepostAccept();		// 종료 중이면 내부에서 무시된다
 		return;
 	}
 
+	// 소켓 옵션 설정 + 접속자 주소 조회. 실패하면 이 연결은 버리고 다음 접속을 받는다
+	SOCKADDR_IN peerAddr{};
+	if (!ConfigureAcceptedSocket(accSocket, peerAddr))
+	{
+		closesocket(accSocket);
+		RepostAccept();
+		return;
+	}
+
+	// 걸어둔 AcceptEx는 1회성. 새로운 연결을 받기 위해 다시 호출
+	RepostAccept();
+
+	// 세션 생성 → 관리 컨테이너 등록 → IOCP 연결
+	std::shared_ptr<Session> session = CreateSession(accSocket, peerAddr);
+	if (!session)
+		return;
+
+	// 첫 recv 등록. 실패하면 Start() 안에서 Close() 되어 정상적으로 정리된다.
+	if (!session->Start())
+		return;
+
+	// 클라이언트 연결 완료. 초기 연결 정보 전송
+	printf("[Accept] new client: %s(%llu)\n", inet_ntoa(peerAddr.sin_addr), accSocket);
+
+	DataPacket packet{};
+	packet.header.id = accSocket;
+	packet.header.len = sizeof(DataPacket);
+	session->OnSend(&packet, sizeof(DataPacket));
+}
+
+// accept 직후 소켓 설정. 하나라도 실패하면 false (호출한 쪽에서 소켓을 닫는다)
+bool IOCP_server::ConfigureAcceptedSocket(SOCKET accSocket, SOCKADDR_IN& peerAddr)
+{
 	// accept context 업데이트
 	// AcceptEx로 생성된 소켓을 listen socket의 accept context와 연결
 	// 이후 getpeername, SO_KEEPALIVE 등의 소켓 옵션 사용
-	setsockopt(accSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(m_listenSock->socket), sizeof(m_listenSock->socket));
+	if (setsockopt(accSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(m_listenSock->socket), sizeof(m_listenSock->socket)) == SOCKET_ERROR)
+	{
+		printf("[Accept] SO_UPDATE_ACCEPT_CONTEXT failed: %d\n", WSAGetLastError());
+		return false;
+	}
 
 	char optval = 1;
-	setsockopt(accSocket, SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval));		// keep alive 설정
+	if (setsockopt(accSocket, SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval)) == SOCKET_ERROR)		// keep alive 설정
+	{
+		printf("[Accept] SO_KEEPALIVE failed: %d\n", WSAGetLastError());
+		return false;
+	}
 
-	tcp_keepalive keepAlive;
+	tcp_keepalive keepAlive{};
 	keepAlive.onoff = 1;
-	keepAlive.keepalivetime = 5000;      // 5 sec
-	keepAlive.keepaliveinterval = 1000;   // 1 sec
+	keepAlive.keepalivetime = KEEPALIVE_TIME_MS;
+	keepAlive.keepaliveinterval = KEEPALIVE_INTERVAL_MS;
 
-	DWORD bytesReturned;
+	DWORD bytesReturned = 0;
 	if (WSAIoctl(accSocket, SIO_KEEPALIVE_VALS, &keepAlive, sizeof(keepAlive), NULL, 0, &bytesReturned, NULL, NULL) == SOCKET_ERROR)
 	{
 		printf("client socket set SIO_KEEPALIVE_VALS failed: %d\n", WSAGetLastError());
-		closesocket(accSocket);
-		PostAccept();
-		return;
+		return false;
 	}
 
-	SOCKADDR_IN socketAddr;
-	int len = sizeof(socketAddr);
-	getpeername(accSocket, (SOCKADDR*)&socketAddr, &len);
+	int len = sizeof(peerAddr);
+	if (getpeername(accSocket, (SOCKADDR*)&peerAddr, &len) == SOCKET_ERROR)
+	{
+		printf("[Accept] getpeername failed: %d\n", WSAGetLastError());
+		return false;
+	}
 
-	// 걸어둔 AcceptEx는 1회성. 새로운 연결을 받기 위해 다시 호출
-	PostAccept();
+	return true;
+}
 
-	// Session에서 발생한 패킷/연결 종료 이벤트를 서버로 전달
-	auto session = std::make_shared<Session>([this](DataPacket* data) { InsertPacket(data); }, [this](SOCKET socket) { CloseSession(socket); });
-	// 완료통지에서 할당한 소켓 주소 key 삽입
-	session->SetSessionInfo(accSocket, socketAddr);
+// Session 을 만들어 관리 컨테이너에 등록하고 IOCP 연결
+std::shared_ptr<Session> IOCP_server::CreateSession(SOCKET accSocket, const SOCKADDR_IN& peerAddr)
+{
+	// Session 에서 발생한 패킷/종료 이벤트를 서버로 전달
+	auto session = std::make_shared<Session>(accSocket, peerAddr, [this](DataPacket* data) { InsertPacket(data); }, [this](SessionId id) { CloseSession(id); });
 
-	// 연결된 클라이언트를 관리 컨테이너에 등록 및 연결완료 통지
+	// [순서 중요] connect 통지 → 맵 등록.
+	// 맵에 등록되는 순간부터 다른 스레드(서버 종료 등)가 이 세션을 Close() 할 수 있고, Close() 는 disconnect 통지를 보낸다.
+	// 등록 뒤에 connect 통지를 하면 disconnect 통지가 connect 통지보다 먼저 나갈 수 있다.
 	if (m_connectCall)
 		m_connectCall(accSocket);
 
 	{
-		std::lock_guard lock(m_sessionMtx);
+		std::lock_guard<std::mutex> lock(m_sessionMtx);
 		m_sessionManager.emplace(accSocket, session);
 	}
 
-	// 서버 종료와의 경합: CloseServerSocket 의 스냅샷 이후에 등록된 세션은 스스로 닫는다
+	// 서버 종료 후 연결된 세션 닫기
 	if (!m_open)
 	{
 		session->Close();
-		return;
+		return nullptr;
 	}
 
 	// 접속 client socket IOCP 등록 (CompletionKey = SOCKET id)
@@ -268,26 +338,17 @@ void IOCP_server::OnAccept(ACCEPT_CONTEXT* rawCtx, bool ok)
 	{
 		printf("[Accept] CreateIoCompletionPort failed: %d\n", WSAGetLastError());
 		session->Close();
-		return;
+		return nullptr;
 	}
 
-	if (session->PostRecv())
-	{
-		DataPacket packet{};
-
-		// 클라이언트 연결 완료. 초기 연결 정보 전송
-		printf("[Accept] new client: %s(%lld)\n", inet_ntoa(socketAddr.sin_addr), accSocket);
-		packet.header.id = accSocket;
-		packet.header.len = sizeof(DataPacket);
-		session->OnSend(&packet, sizeof(DataPacket));
-	}
+	return session;
 }
 
-void IOCP_server::CloseSession(uint64_t id)
+void IOCP_server::CloseSession(SessionId id)
 {
 	RemoveSession(id);
 
-	printf("[Disconnect] session %llu\n", (unsigned long long)id);
+	printf("[Disconnect] session %llu\n", id);
 
 	if (m_disconnectCall)
 		m_disconnectCall(id);
@@ -302,27 +363,24 @@ void IOCP_server::CloseServerSocket()
 	{
 		// 연결된 session 정리
 		std::vector<std::shared_ptr<Session>> snapshot;
-		snapshot.reserve(m_sessionManager.size());
-		for (auto& kv : m_sessionManager)
-			snapshot.push_back(kv.second);
+		{
+			std::lock_guard<std::mutex> lock(m_sessionMtx);	// 워커가 맵을 수정 중일 수 있으므로 락 필요
+			snapshot.reserve(m_sessionManager.size());
+			for (auto& kv : m_sessionManager)
+				snapshot.push_back(kv.second);
+		}
 		for (auto& s : snapshot)
 			s->Close();
 
 		snapshot.clear();
 
-		// INFINITE 대기 중인 Worker를 꺠움
 		for (int i = 0; i < IO_WORKER_COUNT; i++)
-		{
-			PostQueuedCompletionStatus(m_hIOCP, 0, 0, nullptr);
-		}
+			m_worker[i].request_stop();
 
 		for (int i = 0; i < IO_WORKER_COUNT; i++)
 		{
 			if (m_worker[i].joinable())
-			{
-				m_worker[i].request_stop();
 				m_worker[i].join();
-			}
 		}
 
 		CloseHandle(m_hIOCP);
@@ -349,14 +407,14 @@ int IOCP_server::GetRecvData(std::queue<DataPacket*>* container)
 	return swapSize;
 }
 
-std::shared_ptr<Session> IOCP_server::FindSession(uint64_t id)
+std::shared_ptr<Session> IOCP_server::FindSession(SessionId id)
 {
 	std::lock_guard lock(m_sessionMtx);
 	auto it = m_sessionManager.find(id);
 	return it == m_sessionManager.end() ? nullptr : it->second;
 }
 
-std::shared_ptr<Session> IOCP_server::RemoveSession(uint64_t id)
+std::shared_ptr<Session> IOCP_server::RemoveSession(SessionId id)
 {
 	std::lock_guard lock(m_sessionMtx);
 

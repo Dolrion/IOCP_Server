@@ -4,7 +4,7 @@
 * 1. PostAccept() → AcceptEx 등록
 * 2. 클라이언트 접속
 * 3. IOCP에서 IO_ACCEPT 완료 통지
-* 4. acceptSocket을 client socket으로 전환
+* 4. acceptSocket을 session 전환
 * 5. Session 생성 (shared_ptr) → 맵 등록 → client socket을 IOCP에 등록
 * 6. PostRecv() → 수신 대기 (I/O 컨텍스트가 Session 참조)
 * 7. PostAccept() → 다음 접속 대비

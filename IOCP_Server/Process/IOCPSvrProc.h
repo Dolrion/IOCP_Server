@@ -13,7 +13,7 @@ private:
 	std::queue<DataPacket*> m_procBatch;
 
 	std::mutex m_mtx;
-	std::unordered_map <SOCKET, int> m_sockList;
+	std::unordered_map <SessionId, int> m_sockList;
 
 	std::jthread m_worker;
 	std::unique_ptr<IOCP_server> m_server;
@@ -27,6 +27,6 @@ public:
 
 	bool OpenServer(int port);
 
-	void RegisterClient(SOCKET socket);
-	void ReleaseClient(SOCKET socket);
+	void RegisterClient(SessionId id);
+	void ReleaseClient(SessionId id);
 };

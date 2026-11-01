@@ -4,7 +4,7 @@
 
 IOCPSvrProc::IOCPSvrProc()
 {
-	m_server = std::make_unique<IOCP_server>([this](SOCKET s) { RegisterClient(s); }, [this](SOCKET s) { ReleaseClient(s); });
+	m_server = std::make_unique<IOCP_server>([this](SessionId id) { RegisterClient(id); }, [this](SessionId id) { ReleaseClient(id); });
 }
 
 IOCPSvrProc::~IOCPSvrProc()
@@ -27,20 +27,16 @@ bool IOCPSvrProc::OpenServer(int port)
 	return res;
 }
 
-void IOCPSvrProc::RegisterClient(SOCKET socket)
+void IOCPSvrProc::RegisterClient(SessionId id)
 {
 	std::lock_guard<std::mutex> lock(m_mtx);
-	m_sockList.emplace(socket, 0);
+	m_sockList.emplace(id, 0);
 }
 
-void IOCPSvrProc::ReleaseClient(SOCKET socket)
+void IOCPSvrProc::ReleaseClient(SessionId id)
 {
 	std::lock_guard<std::mutex> lock(m_mtx);
-
-	if (m_sockList.find(socket) != m_sockList.end())
-	{
-		m_sockList.erase(socket);
-	}
+	m_sockList.erase(id);
 }
 
 void IOCPSvrProc::GetRecvData(std::stop_token token)
@@ -62,6 +58,6 @@ void IOCPSvrProc::GetRecvData(std::stop_token token)
 			}
 		}
 		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			std::this_thread::sleep_for(std::chrono::milliseconds(CONSUMER_POLL_MS));
 	}
 }

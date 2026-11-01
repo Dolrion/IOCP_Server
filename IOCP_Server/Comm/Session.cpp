@@ -4,20 +4,23 @@
 #include "../Pool/MemoryPool.h"
 #include <cstdio>
 
-Session::Session(PacketCallback pushMessage, CloseCallback closeEvent) : m_recvBuf(RECV_RING_SIZE), m_msgComplete(std::move(pushMessage)), m_onClosed(std::move(closeEvent))
+Session::Session(SOCKET socket, const SOCKADDR_IN& socketAddr, PacketCallback pushMessage, CloseCallback closeEvent)
+	: m_recvBuf(RECV_RING_SIZE), m_msgComplete(std::move(pushMessage)), m_onClosed(std::move(closeEvent))
 {
+	m_session.socket = socket;
+	m_session.socketAddr = socketAddr;
 	m_recvCtx.type = IO_RECV;
 }
 
 Session::~Session()
 {
-	closesocket(m_session.socket);
+	// 이 시점에는 걸려 있는 I/O 가 없다 (모든 I/O 가 owner 로 Session 을 쥐고 있었기 때문). 소켓 핸들은 여기서만 닫는다.
+	m_session.CloseSocket();
 }
 
-void Session::SetSessionInfo(SOCKET socket, SOCKADDR_IN socketAddr)
+bool Session::Start()
 {
-	m_session.socket = socket;
-	m_session.socketAddr = socketAddr;
+	return PostRecv();
 }
 
 bool Session::PostRecv()
@@ -28,7 +31,7 @@ bool Session::PostRecv()
 	// 초기화 필수
 	ZeroMemory(&m_recvCtx.overlapped, sizeof(OVERLAPPED));
 
-	// I/O 를 걸기 '전에' 참조를 쥔다. (완료 통지는 걸자마자 다른 워커에 도착할 수 있음)
+	// I/O 걸기 전 참조를 쥔다. (완료 통지는 걸자마자 다른 워커에 도착할 수 있음)
 	m_recvCtx.owner = shared_from_this();
 
 	DWORD flags = 0;
@@ -36,14 +39,14 @@ bool Session::PostRecv()
 
 	if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING)
 	{
-		// 등록 실패 → 완료 통지가 오지 않으므로 참조를 직접 반납
+		// 등록 실패 → 참조 반납
 		printf("[Session %llu] WSARecv failed: %d\n", (unsigned long long)m_session.socket, WSAGetLastError());
 		m_recvCtx.owner.reset();
 		Close();
 		return false;
 	}
 
-	// 등록하는 사이 Close() 가 먼저 실행됐을 수 있으므로 한 번 더 확인해서 취소
+	// PostRecv() 수행 동안 Close() 호출 여부 확인
 	if (m_closed.load())
 		CancelIoEx(reinterpret_cast<HANDLE>(m_session.socket), nullptr);
 
@@ -121,6 +124,13 @@ bool Session::OnSend(void* sData, size_t len)
 	if (m_closed.load())
 		return false;
 
+	if (m_pendingSendBytes.load() + len > MAX_PENDING_SEND_BYTES)
+	{
+		Close();
+		return false;
+	}
+	m_pendingSendBytes += len;
+
 	auto ioCtx = m_sendCtxPool.Acquire();
 	printf("socket %lld - acquire send io addr: 0x%p\n", m_session.socket, ioCtx);
 
@@ -132,6 +142,7 @@ bool Session::OnSend(void* sData, size_t len)
 	int rst = WSASend(m_session.socket, &ioCtx->buffer, 1, &sent, 0, &ioCtx->overlapped, nullptr);
 	if (rst == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING)
 	{
+		m_pendingSendBytes -= len;
 		ioCtx->owner.reset();
 		m_sendCtxPool.Release(ioCtx);
 
@@ -148,6 +159,7 @@ bool Session::OnSend(void* sData, size_t len)
 // IOCP 완료 통지로부터 수신 받은 send 완료 context
 void Session::SendComplete(SEND_IO_CONTEXT& ioCtx, bool success)
 {
+	m_pendingSendBytes -= ioCtx.buffer.len;
 	// SEND_IO_CONTEXT 자원 반환 (재사용)
 	ZeroMemory(&ioCtx.overlapped, sizeof(OVERLAPPED));
 	m_sendCtxPool.Release(&ioCtx);
@@ -163,12 +175,10 @@ void Session::Close()
 	if (m_closed.exchange(true))
 		return;
 
-	// 이 함수가 도는 동안 Session 이 파괴되지 않도록 자기 참조를 쥔다
-	// (맵에서 제거되며 마지막 참조가 사라지는 경우 방어)
+	// Session 참조 유지를 위해 자기 참조를 쥔다
 	std::shared_ptr<Session> self = shared_from_this();
 
-	// 걸려 있는 I/O 를 오류로 완료시켜 깨운다. (핸들은 ~Session 에서 닫음)
-	// shutdown 을 먼저 하면 이후 새로 거는 I/O 는 동기 실패하고, 이미 걸린 I/O 는 CancelIoEx 가 취소한다.
+	// 걸려 있는 I/O 취소
 	shutdown(m_session.socket, SD_BOTH);
 	CancelIoEx(reinterpret_cast<HANDLE>(m_session.socket), nullptr);
 
